@@ -35,6 +35,17 @@
 #include "yaffs_tagsvalidity.h"
 #include "yaffs_packedtags2.h"
 
+typedef unsigned char		u_char;
+typedef unsigned short		u_short;
+typedef unsigned int		u_int;
+typedef unsigned long		u_long;
+
+typedef unsigned char		uint8_t;
+typedef unsigned short		uint16_t;
+typedef unsigned int		uint32_t;
+
+
+
 unsigned yaffs_traceMask=0;
 
 #define MAX_OBJECTS 10000
@@ -64,6 +75,32 @@ static int outFile;
 static int error;
 
 static int convert_endian = 0;
+
+struct nand_oobinfo {
+	uint32_t useecc;
+	uint32_t eccbytes;
+	uint32_t oobfree[8][2];
+	uint32_t eccpos[32];
+};
+
+/* ECC byte placement */
+#define MTD_NANDECC_OFF		0	// Switch off ECC (Not recommended)
+#define MTD_NANDECC_PLACE	1	// Use the given placement in the structure (YAFFS1 legacy mode)
+#define MTD_NANDECC_AUTOPLACE	2	// Use the default placement scheme
+#define MTD_NANDECC_PLACEONLY	3	// Use the given placement in the structure (Do not store ecc result on read)
+#define MTD_NANDECC_AUTOPL_USR 	4	// Use the given autoplacement scheme rather than using the default
+
+static struct nand_oobinfo nand_oob_64 = {
+	.useecc = MTD_NANDECC_AUTOPLACE,
+	.eccbytes = 24,
+	.eccpos = {
+		40, 41, 42, 43, 44, 45, 46, 47, 
+		48, 49, 50, 51, 52, 53, 54, 55, 
+		56, 57, 58, 59, 60, 61, 62, 63},
+	.oobfree = { {2, 38} }
+};
+
+static u_char oob_buf[spareSize];
 
 static int obj_compare(const void *a, const void * b)
 {
@@ -154,10 +191,156 @@ static void little_to_big_endian(yaffs_Tags *tagsPtr)
 #endif
 }
 
+
+/*
+ * Pre-calculated 256-way 1 byte column parity
+ */
+static const u_char nand_ecc_precalc_table[] = {
+	0x00, 0x55, 0x56, 0x03, 0x59, 0x0c, 0x0f, 0x5a, 0x5a, 0x0f, 0x0c, 0x59, 0x03, 0x56, 0x55, 0x00,
+	0x65, 0x30, 0x33, 0x66, 0x3c, 0x69, 0x6a, 0x3f, 0x3f, 0x6a, 0x69, 0x3c, 0x66, 0x33, 0x30, 0x65,
+	0x66, 0x33, 0x30, 0x65, 0x3f, 0x6a, 0x69, 0x3c, 0x3c, 0x69, 0x6a, 0x3f, 0x65, 0x30, 0x33, 0x66,
+	0x03, 0x56, 0x55, 0x00, 0x5a, 0x0f, 0x0c, 0x59, 0x59, 0x0c, 0x0f, 0x5a, 0x00, 0x55, 0x56, 0x03,
+	0x69, 0x3c, 0x3f, 0x6a, 0x30, 0x65, 0x66, 0x33, 0x33, 0x66, 0x65, 0x30, 0x6a, 0x3f, 0x3c, 0x69,
+	0x0c, 0x59, 0x5a, 0x0f, 0x55, 0x00, 0x03, 0x56, 0x56, 0x03, 0x00, 0x55, 0x0f, 0x5a, 0x59, 0x0c,
+	0x0f, 0x5a, 0x59, 0x0c, 0x56, 0x03, 0x00, 0x55, 0x55, 0x00, 0x03, 0x56, 0x0c, 0x59, 0x5a, 0x0f,
+	0x6a, 0x3f, 0x3c, 0x69, 0x33, 0x66, 0x65, 0x30, 0x30, 0x65, 0x66, 0x33, 0x69, 0x3c, 0x3f, 0x6a,
+	0x6a, 0x3f, 0x3c, 0x69, 0x33, 0x66, 0x65, 0x30, 0x30, 0x65, 0x66, 0x33, 0x69, 0x3c, 0x3f, 0x6a,
+	0x0f, 0x5a, 0x59, 0x0c, 0x56, 0x03, 0x00, 0x55, 0x55, 0x00, 0x03, 0x56, 0x0c, 0x59, 0x5a, 0x0f,
+	0x0c, 0x59, 0x5a, 0x0f, 0x55, 0x00, 0x03, 0x56, 0x56, 0x03, 0x00, 0x55, 0x0f, 0x5a, 0x59, 0x0c,
+	0x69, 0x3c, 0x3f, 0x6a, 0x30, 0x65, 0x66, 0x33, 0x33, 0x66, 0x65, 0x30, 0x6a, 0x3f, 0x3c, 0x69,
+	0x03, 0x56, 0x55, 0x00, 0x5a, 0x0f, 0x0c, 0x59, 0x59, 0x0c, 0x0f, 0x5a, 0x00, 0x55, 0x56, 0x03,
+	0x66, 0x33, 0x30, 0x65, 0x3f, 0x6a, 0x69, 0x3c, 0x3c, 0x69, 0x6a, 0x3f, 0x65, 0x30, 0x33, 0x66,
+	0x65, 0x30, 0x33, 0x66, 0x3c, 0x69, 0x6a, 0x3f, 0x3f, 0x6a, 0x69, 0x3c, 0x66, 0x33, 0x30, 0x65,
+	0x00, 0x55, 0x56, 0x03, 0x59, 0x0c, 0x0f, 0x5a, 0x5a, 0x0f, 0x0c, 0x59, 0x03, 0x56, 0x55, 0x00
+};
+
+
+/**
+ * nand_trans_result - [GENERIC] create non-inverted ECC
+ * @reg2:	line parity reg 2
+ * @reg3:	line parity reg 3
+ * @ecc_code:	ecc 
+ *
+ * Creates non-inverted ECC code from line parity
+ */
+static void nand_trans_result(u_char reg2, u_char reg3,
+	u_char *ecc_code)
+{
+	u_char a, b, i, tmp1, tmp2;
+	
+	/* Initialize variables */
+	a = b = 0x80;
+	tmp1 = tmp2 = 0;
+	
+	/* Calculate first ECC byte */
+	for (i = 0; i < 4; i++) {
+		if (reg3 & a)		/* LP15,13,11,9 --> ecc_code[0] */
+			tmp1 |= b;
+		b >>= 1;
+		if (reg2 & a)		/* LP14,12,10,8 --> ecc_code[0] */
+			tmp1 |= b;
+		b >>= 1;
+		a >>= 1;
+	}
+	
+	/* Calculate second ECC byte */
+	b = 0x80;
+	for (i = 0; i < 4; i++) {
+		if (reg3 & a)		/* LP7,5,3,1 --> ecc_code[1] */
+			tmp2 |= b;
+		b >>= 1;
+		if (reg2 & a)		/* LP6,4,2,0 --> ecc_code[1] */
+			tmp2 |= b;
+		b >>= 1;
+		a >>= 1;
+	}
+	
+	/* Store two of the ECC bytes */
+	ecc_code[0] = tmp1;
+	ecc_code[1] = tmp2;
+}
+
+/**
+ * nand_calculate_ecc - [NAND Interface] Calculate 3 byte ECC code for 256 byte block
+ * @mtd:	MTD block structure
+ * @dat:	raw data
+ * @ecc_code:	buffer for ECC
+ */
+int nand_calculate_ecc(const u_char *dat, u_char *ecc_code)
+{
+	u_char idx, reg1, reg2, reg3;
+	int j;
+	
+	/* Initialize variables */
+	reg1 = reg2 = reg3 = 0;
+	ecc_code[0] = ecc_code[1] = ecc_code[2] = 0;
+	
+	/* Build up column parity */ 
+	for(j = 0; j < 256; j++) {
+		
+		/* Get CP0 - CP5 from table */
+		idx = nand_ecc_precalc_table[dat[j]];
+		reg1 ^= (idx & 0x3f);
+		
+		/* All bit XOR = 1 ? */
+		if (idx & 0x40) {
+			reg3 ^= (u_char) j;
+			reg2 ^= ~((u_char) j);
+		}
+	}
+	
+	/* Create non-inverted ECC code from line parity */
+	nand_trans_result(reg2, reg3, ecc_code);
+	
+	/* Calculate final ECC code */
+	ecc_code[0] = ~ecc_code[0];
+	ecc_code[1] = ~ecc_code[1];
+	ecc_code[2] = ((~reg1) << 2) | 0x03;
+	return 0;
+}
+
+
+/** 
+ * nand_prepare_oobbuf - [GENERIC] Prepare the out of band buffer 
+ * @fsbuf:	buffer given by fs driver
+ * @oobsel:	out of band selection structre
+ * @autoplace:	1 = place given buffer into the oob bytes
+ * @numpages:	number of pages to prepare
+ *
+ * Return:
+ * 1. Filesystem buffer available and autoplacement is off,
+ *    return filesystem buffer
+ * 2. No filesystem buffer or autoplace is off, return internal
+ *    buffer
+ * 3. Filesystem buffer is given and autoplace selected
+ *    put data from fs buffer into internal buffer and
+ *    retrun internal buffer
+ *
+ * Note: The internal buffer is filled with 0xff. This must
+ * be done only once, when no autoplacement happens
+ * Autoplacement sets the buffer dirty flag, which
+ * forces the 0xff fill before using the buffer again.
+ *
+*/
+static void nand_prepare_oobbuf (u_char *oob_buf, u_char *fs_buf, struct nand_oobinfo *oobsel)
+{
+	int i;
+
+	for (i = 0; oobsel->oobfree[i][1]; i++) {
+		int to = oobsel->oobfree[i][0];
+		int num = oobsel->oobfree[i][1];
+		memcpy (&oob_buf[to], fs_buf, num);
+		fs_buf += num;
+	}	
+}
+
+
 static int write_chunk(__u8 *data, __u32 objId, __u32 chunkId, __u32 nBytes)
 {
 	yaffs_ExtendedTags t;
 	yaffs_PackedTags2 pt;
+	__u8 ecc_code[3];
+	int i;
 
 	error = write(outFile,data,chunkSize);
 	if(error < 0) return error;
@@ -185,7 +368,18 @@ static int write_chunk(__u8 *data, __u32 objId, __u32 chunkId, __u32 nBytes)
 	yaffs_PackTags2(&pt,&t);
 	
 //	return write(outFile,&pt,sizeof(yaffs_PackedTags2));
-	return write(outFile,&pt,spareSize);
+
+	memset(oob_buf, 0xff, sizeof(oob_buf));
+	nand_prepare_oobbuf(oob_buf, (u_char *)&pt, &nand_oob_64);
+
+	for (i = 0; i < chunkSize/256; i++) {
+	    nand_calculate_ecc(data+i*256, ecc_code);
+		oob_buf[nand_oob_64.eccpos[i*3]] = ecc_code[0];
+		oob_buf[nand_oob_64.eccpos[i*3]+1] = ecc_code[1];
+		oob_buf[nand_oob_64.eccpos[i*3]+2] = ecc_code[2];
+	}
+	
+	return write(outFile,oob_buf,spareSize);
 	
 }
 

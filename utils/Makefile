@@ -28,8 +28,9 @@ CC=$(MAKETOOLS)gcc
 COMMONLINKS = yaffs_ecc.c
 COMMONOBJS = $(COMMONLINKS:.c=.o)
 
-MKYAFFSSOURCES = mkyaffsimage.c
-MKYAFFSIMAGEOBJS = $(MKYAFFSSOURCES:.c=.o)
+MKYAFFSSOURCES = mkyaffsimage.c nand_ecc.c
+MKYAFFSLINKS = yaffs_packedtags1.c
+MKYAFFSIMAGEOBJS = $(MKYAFFSSOURCES:.c=.o) $(MKYAFFSLINKS:.c=.o)
 
 MKYAFFS2SOURCES = mkyaffs2image.c
 MKYAFFS2LINKS = yaffs_packedtags2.c yaffs_tagsvalidity.c

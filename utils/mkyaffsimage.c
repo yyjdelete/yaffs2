@@ -29,7 +29,7 @@
 #include <unistd.h>
 #include "yaffs_ecc.h"
 #include "yaffs_guts.h"
-
+#include "yaffs_packedtags1.h"
 
 #define MAX_OBJECTS 10000
 
@@ -230,6 +230,7 @@ static void little_to_big_endian(yaffs_Tags *tagsPtr)
 
 static int write_chunk(__u8 *data, __u32 objId, __u32 chunkId, __u32 nBytes)
 {
+#ifdef CONFIG_YAFFS_9BYTE_TAGS
 	yaffs_Tags t;
 	yaffs_Spare s;
 
@@ -256,7 +257,53 @@ static int write_chunk(__u8 *data, __u32 objId, __u32 chunkId, __u32 nBytes)
 	nPages++;
 	
 	return write(outFile,&s,sizeof(yaffs_Spare));
-	
+#else	/* modified by thisway.diy@163.com, from www.100ask.net, to support the new oob layout of kernel 2.6.22 */
+    yaffs_PackedTags1 pt1;
+    yaffs_ExtendedTags  etags;
+	__u8 ecc_code[6];
+    __u8 oobbuf[16];
+    
+    /* 写页数据，512字节 */
+    error = write(outFile,data,512);
+    if(error < 0) return error;
+
+    /* 构造tag */
+    etags.chunkId       = chunkId;
+    etags.serialNumber  = 0;
+    etags.byteCount     = nBytes;
+    etags.objectId      = objId;
+    etags.chunkDeleted  = 0;
+
+    /* 
+     * 重定位oob区中的可用数据(称为tag)
+     */
+    yaffs_PackTags1(&pt1, &etags);
+
+    /* 计算tag本身的ECC码 */
+    yaffs_CalcTagsECC((yaffs_Tags *)&pt1);
+
+    memset(oobbuf, 0xff, 16);
+    memcpy(oobbuf+8, &pt1, 8);
+
+    /* 
+     * 使用与内核MTD层相同的方法计算一页数据(512字节)的ECC码 
+     * 并把它们填入oob
+     */
+    nand_calculate_ecc(data, &ecc_code[0]);
+    nand_calculate_ecc(data+256, &ecc_code[3]);
+
+    oobbuf[0] = ecc_code[0];
+    oobbuf[1] = ecc_code[1];
+    oobbuf[2] = ecc_code[2];
+    oobbuf[3] = ecc_code[3];
+    oobbuf[6] = ecc_code[4];
+    oobbuf[7] = ecc_code[5];
+
+    nPages++;
+
+    /* 写oob数据，16字节 */
+    return write(outFile, oobbuf, 16);
+#endif	
 }
 
 #define SWAP32(x)   ((((x) & 0x000000FF) << 24) | \
